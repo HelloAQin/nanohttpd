@@ -1,4 +1,4 @@
-name: Build NanoHTTPD Raw DEX
+name: Build Dex From Source (NanoHttpd)
 
 on:
   push:
@@ -6,70 +6,90 @@ on:
   workflow_dispatch:
 
 env:
-  NANO_VERSION: "2.3.1"
-  # 最终生成的 dex 文件名
-  OUTPUT_DEX_NAME: "nanohttpd_websocket.dex"
+  # 最终输出文件名
+  OUTPUT_FILENAME: "nanohttpd_snapshot_dex.jar"
 
 jobs:
-  build:
+  build_source:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout Your Repo
         uses: actions/checkout@v4
+        # 这一步是为了获取当前仓库的上下文（如果需要），
+        # 但我们主要是要拉取 NanoHttpd 的源码，见下一步。
 
-      - name: Set up JDK 17
+      - name: Clone NanoHttpd Source
+        run: |
+          git clone https://github.com/NanoHttpd/nanohttpd.git source_code
+          echo "Cloned successfully."
+
+      - name: Set up JDK 11
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '11' # Gradle 4.x~6.x 配合 JDK 8 或 11 比较稳
           distribution: 'temurin'
 
-      - name: Download NanoHTTPD JARs
+      - name: Build with Gradle
+        working-directory: ./source_code
         run: |
-          mkdir -p libs
-          echo "Downloading Core..."
-          wget "https://repo1.maven.org/maven2/org/nanohttpd/nanohttpd/${{ env.NANO_VERSION }}/nanohttpd-${{ env.NANO_VERSION }}.jar" -O libs/nanohttpd-core.jar
-          echo "Downloading WebSocket..."
-          wget "https://repo1.maven.org/maven2/org/nanohttpd/nanohttpd-websocket/${{ env.NANO_VERSION }}/nanohttpd-websocket-${{ env.NANO_VERSION }}.jar" -O libs/nanohttpd-websocket.jar
+          chmod +x gradlew
+          # 跳过测试 (-x test) 以节省时间并避免环境报错
+          # 同时构建 core 和 websocket 模块
+          ./gradlew :core:jar :websocket:jar -x test
 
-      - name: Locate Android Build Tools (d8)
+      - name: Locate Compiled JARs
+        id: locate-jars
+        working-directory: ./source_code
+        run: |
+          # 查找构建生成的 jar 文件
+          CORE_JAR=$(find core/build/libs -name "nanohttpd-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
+          WS_JAR=$(find websocket/build/libs -name "nanohttpd-websocket-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
+          
+          echo "Found Core: $CORE_JAR"
+          echo "Found WebSocket: $WS_JAR"
+          
+          # 保存绝对路径供下一步使用
+          echo "core_jar=$(pwd)/$CORE_JAR" >> $GITHUB_OUTPUT
+          echo "ws_jar=$(pwd)/$WS_JAR" >> $GITHUB_OUTPUT
+
+      - name: Locate Android SDK & d8
         id: locate-tools
         run: |
-          # 自动查找环境中的 d8 工具
-          BUILD_TOOLS_PATH=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
-          echo "Found build-tools at: $BUILD_TOOLS_PATH"
-          echo "d8_path=$BUILD_TOOLS_PATH/d8" >> $GITHUB_OUTPUT
-
-      - name: Compile Custom Java Code (Optional)
-        # 如果仓库里有你自己写的 .java，会在这里编译
-        run: |
-          if ls *.java 1> /dev/null 2>&1; then
-            echo "Found Java source files, compiling..."
-            javac -cp "libs/*" *.java
-          else
-            echo "No custom .java files found. Skipping compilation."
-          fi
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          PLATFORM=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -n 1)
+          
+          echo "d8_path=$BUILD_TOOLS/d8" >> $GITHUB_OUTPUT
+          echo "android_jar=$PLATFORM/android.jar" >> $GITHUB_OUTPUT
 
       - name: Convert to DEX (d8)
         run: |
-          # 构建输入列表：libs 下的 jar + 根目录下的 class
-          INPUTS="libs/*.jar"
-          if ls *.class 1> /dev/null 2>&1; then
-            INPUTS="$INPUTS *.class"
-          fi
+          # 使用上面 Gradle 编译出来的 Jar 进行 dex 转换
+          echo "Dexing..."
           
-          echo "Generating DEX from: $INPUTS"
-          
-          # 执行 d8，--output . 会在当前目录生成 classes.dex
-          ${{ steps.locate-tools.outputs.d8_path }} --min-api 21 --output . $INPUTS
-          
-          # 重命名 classes.dex 为你想要的名字
-          mv classes.dex ${{ env.OUTPUT_DEX_NAME }}
-          
-          ls -l ${{ env.OUTPUT_DEX_NAME }}
+          ${{ steps.locate-tools.outputs.d8_path }} \
+            --min-api 21 \
+            --lib ${{ steps.locate-tools.outputs.android_jar }} \
+            --output . \
+            "${{ steps.locate-jars.outputs.core_jar }}" \
+            "${{ steps.locate-jars.outputs.ws_jar }}"
+            
+          # 重命名生成的 classes.dex (如果需要查看是否生成成功)
+          ls -l classes.dex
 
-      - name: Upload DEX Artifact
+      - name: Package Dex into Jar
+        run: |
+          # 打包成 jar 容器，方便 Android 加载
+          jar -cvf ${{ env.OUTPUT_FILENAME }} classes.dex
+          
+          # 验证包名 (这一步让你放心)
+          echo "=== Verifying Package Name ==="
+          # 解压 core jar 看看里面的类路径
+          jar tf ${{ steps.locate-jars.outputs.core_jar }} | grep "NanoHTTPD.class" | head -n 1
+          echo "============================"
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: raw-dex-file
-          path: ${{ env.OUTPUT_DEX_NAME }}
+          name: nanohttpd-snapshot
+          path: ${{ env.OUTPUT_FILENAME }}
