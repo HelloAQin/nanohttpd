@@ -1,12 +1,9 @@
-name: Build NanoHTTPD Source to Dex (Maven)
+name: Build NanoHTTPD Raw DEX (No Jar)
 
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
-
-env:
-  OUTPUT_FILENAME: "nanohttpd_source_dex.jar"
 
 jobs:
   build_source:
@@ -18,7 +15,6 @@ jobs:
 
       - name: Clone NanoHttpd Source
         run: |
-          # 拉取官方最新源码
           git clone https://github.com/NanoHttpd/nanohttpd.git source_code
           echo "Cloned successfully."
 
@@ -31,22 +27,16 @@ jobs:
       - name: Build with Maven
         working-directory: ./source_code
         run: |
-          # NanoHTTPD 是 Maven 项目，直接用 mvn 编译
-          # -DskipTests 跳过测试，节省时间
+          # 编译源码生成 class/jar
           mvn clean package -DskipTests
 
       - name: Locate Compiled JARs
         id: locate-jars
         working-directory: ./source_code
         run: |
-          # Maven 的输出目录是 target/ 而不是 build/libs/
-          # 查找 core jar
+          # 找到 core 和 websocket 的 jar
           CORE_JAR=$(find core/target -name "nanohttpd-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
-          # 查找 websocket jar
           WS_JAR=$(find websocket/target -name "nanohttpd-websocket-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
-          
-          echo "Found Core: $CORE_JAR"
-          echo "Found WebSocket: $WS_JAR"
           
           if [ -z "$CORE_JAR" ] || [ -z "$WS_JAR" ]; then
             echo "Error: Jars not found!"
@@ -55,13 +45,6 @@ jobs:
           
           echo "core_jar=$(pwd)/$CORE_JAR" >> $GITHUB_OUTPUT
           echo "ws_jar=$(pwd)/$WS_JAR" >> $GITHUB_OUTPUT
-
-      - name: Verify Package Name (Check if org.nanohttpd)
-        run: |
-          echo "=== Checking Package Name inside JAR ==="
-          # 检查编译出来的 jar 里是不是 org/nanohttpd
-          jar tf "${{ steps.locate-jars.outputs.core_jar }}" | grep "NanoHTTPD.class" | head -n 5
-          echo "========================================"
 
       - name: Locate Android SDK & d8
         id: locate-tools
@@ -74,8 +57,8 @@ jobs:
 
       - name: Convert to DEX (d8)
         run: |
-          echo "Dexing..."
-          # 使用 d8 将 maven 编译出的 jar 转为 dex
+          echo "Starting DEX conversion..."
+          # 直接生成 classes.dex
           ${{ steps.locate-tools.outputs.d8_path }} \
             --min-api 21 \
             --lib ${{ steps.locate-tools.outputs.android_jar }} \
@@ -83,15 +66,15 @@ jobs:
             "${{ steps.locate-jars.outputs.core_jar }}" \
             "${{ steps.locate-jars.outputs.ws_jar }}"
             
+          # 将生成的 classes.dex 重命名为你想要的名字
           mv classes.dex nanohttpd.dex
+          
+          echo "Done. File created:"
+          ls -l nanohttpd.dex
 
-      - name: Package Dex into Jar
-        run: |
-          # 打包方便下载和加载
-          jar -cvf ${{ env.OUTPUT_FILENAME }} nanohttpd.dex
-
-      - name: Upload Artifact
+      - name: Upload Raw DEX
         uses: actions/upload-artifact@v4
         with:
-          name: nanohttpd-source-compiled
-          path: ${{ env.OUTPUT_FILENAME }}
+          name: nanohttpd-raw-dex
+          # 直接上传 dex 文件，不再打包成 jar
+          path: nanohttpd.dex
