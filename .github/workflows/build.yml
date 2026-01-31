@@ -1,4 +1,4 @@
-name: Build Dex From Source (NanoHttpd)
+name: Build NanoHTTPD Source to Dex (Maven)
 
 on:
   push:
@@ -6,52 +6,62 @@ on:
   workflow_dispatch:
 
 env:
-  # 最终输出文件名
-  OUTPUT_FILENAME: "nanohttpd_snapshot_dex.jar"
+  OUTPUT_FILENAME: "nanohttpd_source_dex.jar"
 
 jobs:
   build_source:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Your Repo
+      - name: Checkout
         uses: actions/checkout@v4
-        # 这一步是为了获取当前仓库的上下文（如果需要），
-        # 但我们主要是要拉取 NanoHttpd 的源码，见下一步。
 
       - name: Clone NanoHttpd Source
         run: |
+          # 拉取官方最新源码
           git clone https://github.com/NanoHttpd/nanohttpd.git source_code
           echo "Cloned successfully."
 
       - name: Set up JDK 11
         uses: actions/setup-java@v4
         with:
-          java-version: '11' # Gradle 4.x~6.x 配合 JDK 8 或 11 比较稳
+          java-version: '11'
           distribution: 'temurin'
 
-      - name: Build with Gradle
+      - name: Build with Maven
         working-directory: ./source_code
         run: |
-          chmod +x gradlew
-          # 跳过测试 (-x test) 以节省时间并避免环境报错
-          # 同时构建 core 和 websocket 模块
-          ./gradlew :core:jar :websocket:jar -x test
+          # NanoHTTPD 是 Maven 项目，直接用 mvn 编译
+          # -DskipTests 跳过测试，节省时间
+          mvn clean package -DskipTests
 
       - name: Locate Compiled JARs
         id: locate-jars
         working-directory: ./source_code
         run: |
-          # 查找构建生成的 jar 文件
-          CORE_JAR=$(find core/build/libs -name "nanohttpd-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
-          WS_JAR=$(find websocket/build/libs -name "nanohttpd-websocket-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
+          # Maven 的输出目录是 target/ 而不是 build/libs/
+          # 查找 core jar
+          CORE_JAR=$(find core/target -name "nanohttpd-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
+          # 查找 websocket jar
+          WS_JAR=$(find websocket/target -name "nanohttpd-websocket-*.jar" | grep -v "javadoc" | grep -v "sources" | head -n 1)
           
           echo "Found Core: $CORE_JAR"
           echo "Found WebSocket: $WS_JAR"
           
-          # 保存绝对路径供下一步使用
+          if [ -z "$CORE_JAR" ] || [ -z "$WS_JAR" ]; then
+            echo "Error: Jars not found!"
+            exit 1
+          fi
+          
           echo "core_jar=$(pwd)/$CORE_JAR" >> $GITHUB_OUTPUT
           echo "ws_jar=$(pwd)/$WS_JAR" >> $GITHUB_OUTPUT
+
+      - name: Verify Package Name (Check if org.nanohttpd)
+        run: |
+          echo "=== Checking Package Name inside JAR ==="
+          # 检查编译出来的 jar 里是不是 org/nanohttpd
+          jar tf "${{ steps.locate-jars.outputs.core_jar }}" | grep "NanoHTTPD.class" | head -n 5
+          echo "========================================"
 
       - name: Locate Android SDK & d8
         id: locate-tools
@@ -64,9 +74,8 @@ jobs:
 
       - name: Convert to DEX (d8)
         run: |
-          # 使用上面 Gradle 编译出来的 Jar 进行 dex 转换
           echo "Dexing..."
-          
+          # 使用 d8 将 maven 编译出的 jar 转为 dex
           ${{ steps.locate-tools.outputs.d8_path }} \
             --min-api 21 \
             --lib ${{ steps.locate-tools.outputs.android_jar }} \
@@ -74,22 +83,15 @@ jobs:
             "${{ steps.locate-jars.outputs.core_jar }}" \
             "${{ steps.locate-jars.outputs.ws_jar }}"
             
-          # 重命名生成的 classes.dex (如果需要查看是否生成成功)
-          ls -l classes.dex
+          mv classes.dex nanohttpd.dex
 
       - name: Package Dex into Jar
         run: |
-          # 打包成 jar 容器，方便 Android 加载
-          jar -cvf ${{ env.OUTPUT_FILENAME }} classes.dex
-          
-          # 验证包名 (这一步让你放心)
-          echo "=== Verifying Package Name ==="
-          # 解压 core jar 看看里面的类路径
-          jar tf ${{ steps.locate-jars.outputs.core_jar }} | grep "NanoHTTPD.class" | head -n 1
-          echo "============================"
+          # 打包方便下载和加载
+          jar -cvf ${{ env.OUTPUT_FILENAME }} nanohttpd.dex
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nanohttpd-snapshot
+          name: nanohttpd-source-compiled
           path: ${{ env.OUTPUT_FILENAME }}
