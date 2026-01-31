@@ -1,0 +1,80 @@
+name: Build NanoHTTPD Dex
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # 允许手动点击按钮触发
+
+env:
+  # 在这里修改你需要的 NanoHTTPD 版本
+  NANO_VERSION: "2.3.1"
+  # 输出的文件名
+  OUTPUT_JAR: "nanohttpd_websocket_dex.jar"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Download NanoHTTPD JARs
+        run: |
+          mkdir -p libs
+          echo "Downloading Core..."
+          wget "https://repo1.maven.org/maven2/org/nanohttpd/nanohttpd/${{ env.NANO_VERSION }}/nanohttpd-${{ env.NANO_VERSION }}.jar" -O libs/nanohttpd-core.jar
+          echo "Downloading WebSocket..."
+          wget "https://repo1.maven.org/maven2/org/nanohttpd/nanohttpd-websocket/${{ env.NANO_VERSION }}/nanohttpd-websocket-${{ env.NANO_VERSION }}.jar" -O libs/nanohttpd-websocket.jar
+          ls -l libs/
+
+      - name: Locate Android Build Tools (d8)
+        id: locate-tools
+        run: |
+          # 查找最新安装的 Android Build Tools 版本
+          BUILD_TOOLS_PATH=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          echo "Found build-tools at: $BUILD_TOOLS_PATH"
+          echo "d8_path=$BUILD_TOOLS_PATH/d8" >> $GITHUB_OUTPUT
+
+      - name: Compile Custom Java Code (Optional)
+        # 如果你仓库根目录下有 .java 文件（比如你自己的 Server 实现），会自动编译
+        run: |
+          if ls *.java 1> /dev/null 2>&1; then
+            echo "Found Java source files, compiling..."
+            javac -cp "libs/*" *.java
+          else
+            echo "No custom .java files found. Skipping compilation."
+          fi
+
+      - name: Convert to DEX (d8)
+        run: |
+          # 将下载的 jar 和编译生成的 class (如果有) 一起打包成 classes.dex
+          # --min-api 21 保证兼容性
+          # --output . 表示输出到当前目录
+          
+          # 构建输入文件列表：包含 libs 下的所有 jar 和 当前目录下的所有 class
+          INPUTS="libs/*.jar"
+          if ls *.class 1> /dev/null 2>&1; then
+            INPUTS="$INPUTS *.class"
+          fi
+          
+          echo "Dexing inputs: $INPUTS"
+          ${{ steps.locate-tools.outputs.d8_path }} --min-api 21 --output . $INPUTS
+
+      - name: Package DEX into JAR
+        run: |
+          # 将 classes.dex 打包进 jar 文件
+          jar -cvf ${{ env.OUTPUT_JAR }} classes.dex
+          ls -l ${{ env.OUTPUT_JAR }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-dex-jar
+          path: ${{ env.OUTPUT_JAR }}
